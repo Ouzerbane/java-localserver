@@ -4,42 +4,61 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
+import java.util.Iterator;
+import java.util.Set;
 
 public class Server {
 
-    Server() throws Exception {
+    public Server() throws Exception {
         Selector selector = Selector.open();
 
-        ServerSocketChannel server = ServerSocketChannel.open(); // open ServerSocketChannel 
+        ServerSocketChannel server = ServerSocketChannel.open();
 
-        // add port
         server.bind(new InetSocketAddress(5000));
-
-        // Non-Blocking mode
+        
         server.configureBlocking(false);
+
         server.register(selector, SelectionKey.OP_ACCEPT);
 
-
-        // System.out.println("server bdaaaaaaaaaa");
+        System.out.println(" Server    5000 ...");
 
         while (true) {
+            int ready = selector.select(200);
 
-                
-                SocketChannel client = server.accept();
+            if (ready == 0) {
+                continue;
+            }
 
-                if (client != null) {
-                    System.out.println("✅ Client connected");
+            Set<SelectionKey> keys = selector.selectedKeys();
+            Iterator<SelectionKey> it = keys.iterator();
 
-                    String msg = "Hello from ServerSocketChannel!";
+            System.out.println(keys);
 
-                    ByteBuffer buffer = ByteBuffer.wrap(msg.getBytes());
+            while (it.hasNext()) {
+                SelectionKey key = it.next();
+                it.remove();
 
-                    client.write(buffer);
+                if (!key.isValid()) continue;
 
-                   
+                if (key.isAcceptable()) {
+                    ServerSocketChannel srv = (ServerSocketChannel) key.channel();
+                    SocketChannel client = srv.accept();
+
+                    if (client == null) continue;
+
+
+                    String msg = "Hello from ServerSocketChannel!\n";
+                    ByteBuffer buffer = ByteBuffer.wrap(msg.getBytes(StandardCharsets.UTF_8));
+
+                    while (buffer.hasRemaining()) {
+                        client.write(buffer);
+                    }
+
                     client.close();
                 }
-            
             }
+        }
     }
+
 }
