@@ -44,6 +44,7 @@ public class Server {
                 if (key.isAcceptable()) {
                     ServerSocketChannel srv = (ServerSocketChannel) key.channel();
                     SocketChannel client = srv.accept();
+                    System.out.println("==" + client.getRemoteAddress());
 
                     if (client == null) continue;
 
@@ -56,6 +57,7 @@ public class Server {
                     }
 
                     client.close();
+
                 }
             }
         }

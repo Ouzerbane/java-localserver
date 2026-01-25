@@ -1,5 +1,43 @@
 {
-    "host": "127.0.0.1",
-    "port": 8080,
-    "maxThreads": 200
+  "server": {
+    "workerThreads": 200,
+
+    "servers": [
+      {
+        "host": "127.0.0.1",
+        "ports": [8080],
+        "maxConnections": 200,
+
+        "routes": {
+          "/": {
+            "method": ["GET"],
+            "root": "homeHandler"
+          },
+          "/api": {
+            "method": ["GET", "POST"],
+            "handler": "apiHandler"
+          }
+        }
+      },
+
+      {
+        "host": "0.0.0.0",
+        "ports": [80, 443],
+        "maxConnections": 144,
+
+        "routes": {
+          "/": {
+            "method": ["GET"],
+            "handler": "staticFiles",
+            "root": "/var/www/html"
+          },
+          "/upload": {
+            "method": ["POST"],
+            "handler": "uploadHandler",
+            "maxBodySize": "10MB"
+          }
+        }
+      }
+    ]
+  }
 }
