@@ -17,6 +17,32 @@ public class JsonFormatValidator {
         }
     }
 
+    private static class StructuralError {
+
+        public final int index;
+        public final String message;
+
+        public StructuralError(int index, String message) {
+            this.index = index;
+            this.message = message;
+        }
+    }
+
+    private enum Ctx {
+        OBJECT, ARRAY
+    }
+
+    private enum Expect {
+        // OBJECT
+        OBJ_KEY_OR_END,
+        OBJ_COLON,
+        OBJ_VALUE,
+        OBJ_COMMA_OR_END,
+        // ARRAY
+        ARR_VALUE_OR_END,
+        ARR_COMMA_OR_END
+    }
+
     // ========= PUBLIC ENTRY POINT =========
     public static InnerJsonFormatValidator isValidJsonFormat(String json) {
 
@@ -28,116 +54,123 @@ public class JsonFormatValidator {
         // CASE 1b: empty or whitespace only
         int firstNonWhitespace = firstNonWhitespaceIndex(json);
         if (firstNonWhitespace == -1) {
-            return new InnerJsonFormatValidator(
-                    false,
-                    "JSON is empty or contains only whitespace",
-                    0);
+            return new InnerJsonFormatValidator(false, "JSON is empty or contains only whitespace", 0);
         }
 
         // CASE 2: root must start with '{' (config must be an object)
-        char root = json.charAt(firstNonWhitespace);
-        if (root != '{') {
-            return new InnerJsonFormatValidator(
-                    false,
-                    "Config JSON must start with '{'",
-                    firstNonWhitespace);
+        if (json.charAt(firstNonWhitespace) != '{') {
+            return new InnerJsonFormatValidator(false, "Config JSON must start with '{'", firstNonWhitespace);
         }
 
+        // CASE 3: quotes must be closed
         if (!quotesAreClosed(json)) {
             return new InnerJsonFormatValidator(false, "Quotes are not closed", null);
         }
 
-        // CASE 3: braces/brackets must be balanced (ignoring those inside strings)
-        if (!bracesAndBracketsBalanced(json)) {
-            return new InnerJsonFormatValidator(false, "Braces and brackets are not balanced", null);
+        // CASE 6: braces/brackets mismatch/unmatched with index (ignoring inside strings)
+        Integer braceErr = findBraceBracketErrorIndex(json);
+        if (braceErr != null) {
+            return new InnerJsonFormatValidator(false, "Braces/brackets mismatch or unmatched", braceErr);
         }
 
-        if (hasTrailingComma(json)) {
-            return new InnerJsonFormatValidator(false, "Trailing comma detected", null);
+        // CASE 7: trailing comma with index
+        Integer trailingIndex = findTrailingCommaIndex(json);
+        if (trailingIndex != null) {
+            return new InnerJsonFormatValidator(false, "Trailing comma before closing bracket/brace", trailingIndex);
         }
 
-        // CASE 4: reject unknown characters outside strings
-        Integer badCharIndex = findInvalidCharOutsideStrings(json);
-        if (badCharIndex != null) {
+        // CASE 8 + CASE 9: structural rules + strict primitives (non-negative integers only)
+        StructuralError se = findStructuralError(json, firstNonWhitespace);
+        if (se != null) {
+            return new InnerJsonFormatValidator(false, se.message, se.index);
+        }
+
+        // CASE 4: invalid characters outside strings (basic filter)
+        Integer badChar = findInvalidCharOutsideStrings(json);
+        if (badChar != null) {
             return new InnerJsonFormatValidator(
                     false,
-                    "Invalid character outside strings: '" + json.charAt(badCharIndex) + "'",
-                    badCharIndex);
+                    "Invalid character outside strings: '" + json.charAt(badChar) + "'",
+                    badChar
+            );
         }
 
-        // CASE 5: extra non-whitespace content after root object ends
-        Integer extraIndex = findExtraContentAfterRootObject(json, firstNonWhitespace);
-        System.out.println("ccccccc"+extraIndex);
-        if (extraIndex != null) {
-            return new InnerJsonFormatValidator(
-                    false,
-                    "Extra content after root JSON object",
-                    extraIndex);
+        // CASE 5: extra content after root object ends
+        Integer extra = findExtraContentAfterRootObject(json, firstNonWhitespace);
+        if (extra != null) {
+            return new InnerJsonFormatValidator(false, "Extra content after root JSON object", extra);
         }
 
         return new InnerJsonFormatValidator(true, "JSON format looks valid", null);
     }
 
-    // ========= CHECK 1: QUOTES =========
+    // ========= CASE 3: QUOTES =========
     private static boolean quotesAreClosed(String json) {
-        boolean insideString = false;
-
+        boolean inside = false;
         for (int i = 0; i < json.length(); i++) {
-            char c = json.charAt(i);
-
-            if (c == '"' && (i == 0 || json.charAt(i - 1) != '\\')) {
-                insideString = !insideString;
+            if (json.charAt(i) == '"' && (i == 0 || json.charAt(i - 1) != '\\')) {
+                inside = !inside;
             }
         }
-        return !insideString;
+        return !inside;
     }
 
-    // ========= CHECK 2: {} and [] (IGNORE inside strings) =========
-    private static boolean bracesAndBracketsBalanced(String json) {
+    // ========= CASE 6: BRACES / BRACKETS (IGNORE inside strings) =========
+    private static Integer findBraceBracketErrorIndex(String json) {
         Stack<Character> stack = new Stack<>();
-        boolean insideString = false;
+        Stack<Integer> pos = new Stack<>();
+        boolean inside = false;
 
         for (int i = 0; i < json.length(); i++) {
             char c = json.charAt(i);
 
-            // toggle string state
             if (c == '"' && (i == 0 || json.charAt(i - 1) != '\\')) {
-                insideString = !insideString;
+                inside = !inside;
                 continue;
             }
-
-            // ignore any structural chars inside strings
-            if (insideString) {
+            if (inside) {
                 continue;
             }
 
             if (c == '{' || c == '[') {
                 stack.push(c);
-            } else if (c == '}') {
-                if (stack.isEmpty() || stack.pop() != '{') {
-                    return false;
+                pos.push(i);
+            } else if (c == '}' || c == ']') {
+                if (stack.isEmpty()) {
+                    return i; // unmatched closing
+
                 }
-            } else if (c == ']') {
-                if (stack.isEmpty() || stack.pop() != '[') {
-                    return false;
+                char open = stack.pop();
+                pos.pop();
+                if ((c == '}' && open != '{') || (c == ']' && open != '[')) {
+                    return i; // mismatch
                 }
             }
         }
-        return stack.isEmpty();
+
+        // unclosed opening
+        if (!stack.isEmpty()) {
+            return pos.peek();
+        }
+        return null;
     }
 
-    // ========= CHECK 3: TRAILING COMMAS =========
-    private static boolean hasTrailingComma(String json) {
-        boolean insideString = false;
+    // ========= CASE 7: TRAILING COMMA WITH INDEX =========
+    private static Integer findTrailingCommaIndex(String json) {
+        boolean inside = false;
 
         for (int i = 0; i < json.length() - 1; i++) {
             char c = json.charAt(i);
 
             if (c == '"' && (i == 0 || json.charAt(i - 1) != '\\')) {
-                insideString = !insideString;
+                inside = !inside;
+                continue;
+            }
+            if (inside) {
+                continue;
             }
 
-            if (!insideString && c == ',') {
+            if (c == ',') {
                 int j = i + 1;
                 while (j < json.length() && isWhitespace(json.charAt(j))) {
                     j++;
@@ -145,99 +178,342 @@ public class JsonFormatValidator {
                 if (j < json.length()) {
                     char next = json.charAt(j);
                     if (next == '}' || next == ']') {
-                        return true;
+                        return i;
                     }
                 }
             }
         }
-        return false;
+        return null;
     }
 
-    // ========= CHECK 4: INVALID CHARS OUTSIDE STRINGS =========
+    // ========= CASE 8 + 9: ':' and ',' rules + strict primitives =========
+    private static StructuralError findStructuralError(String json, int rootStartIndex) {
+        Stack<Ctx> ctx = new Stack<>();
+        ctx.push(Ctx.OBJECT);
+
+        Expect expect = Expect.OBJ_KEY_OR_END;
+
+        for (int i = rootStartIndex + 1; i < json.length();) {
+            char c = json.charAt(i);
+
+            // strings
+            if (c == '"' && (i == 0 || json.charAt(i - 1) != '\\')) {
+                int end = findStringEnd(json, i);
+                if (end < 0) {
+                    return new StructuralError(i, "Invalid string (missing closing quote)");
+                }
+
+                if (ctx.peek() == Ctx.OBJECT) {
+                    if (expect == Expect.OBJ_KEY_OR_END) {
+                        // key
+                        expect = Expect.OBJ_COLON;
+                    } else if (expect == Expect.OBJ_VALUE) {
+                        // value
+                        expect = Expect.OBJ_COMMA_OR_END;
+                    } else {
+                        return new StructuralError(i, "Unexpected string in object");
+                    }
+                } else {
+                    // array string value
+                    if (expect == Expect.ARR_VALUE_OR_END) {
+                        expect = Expect.ARR_COMMA_OR_END;
+                    } else {
+                        return new StructuralError(i, "Unexpected string in array");
+                    }
+                }
+
+                i = end + 1;
+                continue;
+            }
+
+            // whitespace
+            if (isWhitespace(c)) {
+                i++;
+                continue;
+            }
+
+            // open object
+            if (c == '{') {
+                if (ctx.peek() == Ctx.OBJECT) {
+                    if (expect != Expect.OBJ_VALUE) {
+                        return new StructuralError(i, "Unexpected '{' (value expected after ':')");
+                    }
+                    ctx.push(Ctx.OBJECT);
+                    expect = Expect.OBJ_KEY_OR_END;
+                } else {
+                    if (expect != Expect.ARR_VALUE_OR_END) {
+                        return new StructuralError(i, "Unexpected '{' in array");
+                    }
+                    ctx.push(Ctx.OBJECT);
+                    expect = Expect.OBJ_KEY_OR_END;
+                }
+                i++;
+                continue;
+            }
+
+            // open array
+            if (c == '[') {
+                if (ctx.peek() == Ctx.OBJECT) {
+                    if (expect != Expect.OBJ_VALUE) {
+                        return new StructuralError(i, "Unexpected '[' (value expected after ':')");
+                    }
+                    ctx.push(Ctx.ARRAY);
+                    expect = Expect.ARR_VALUE_OR_END;
+                } else {
+                    if (expect != Expect.ARR_VALUE_OR_END) {
+                        return new StructuralError(i, "Unexpected '[' in array");
+                    }
+                    ctx.push(Ctx.ARRAY);
+                    expect = Expect.ARR_VALUE_OR_END;
+                }
+                i++;
+                continue;
+            }
+
+            // close containers
+            if (c == '}' || c == ']') {
+                Ctx top = ctx.peek();
+
+                if (c == '}' && top != Ctx.OBJECT) {
+                    return new StructuralError(i, "Mismatched closing '}'");
+                }
+                if (c == ']' && top != Ctx.ARRAY) {
+                    return new StructuralError(i, "Mismatched closing ']'");
+                }
+
+                if (top == Ctx.OBJECT) {
+                    if (expect == Expect.OBJ_COLON || expect == Expect.OBJ_VALUE) {
+                        return new StructuralError(i, "Object ended but key/value is incomplete");
+                    }
+                    // allow '}' when expecting key_or_end (empty object) or comma_or_end (after value)
+                    if (expect != Expect.OBJ_KEY_OR_END && expect != Expect.OBJ_COMMA_OR_END) {
+                        return new StructuralError(i, "Unexpected '}'");
+                    }
+                } else {
+                    // ARRAY
+                    if (expect != Expect.ARR_VALUE_OR_END && expect != Expect.ARR_COMMA_OR_END) {
+                        return new StructuralError(i, "Unexpected ']'");
+                    }
+                }
+
+                ctx.pop();
+
+                if (ctx.isEmpty()) {
+                    // root ended
+                    return null;
+                } else {
+                    if (ctx.peek() == Ctx.OBJECT) {
+                        expect = Expect.OBJ_COMMA_OR_END;
+                    } else {
+                        expect = Expect.ARR_COMMA_OR_END;
+                    }
+                }
+
+                i++;
+                continue;
+            }
+
+            // colon
+            if (c == ':') {
+                if (ctx.peek() != Ctx.OBJECT) {
+                    return new StructuralError(i, "':' is not allowed inside arrays");
+                }
+                if (expect != Expect.OBJ_COLON) {
+                    return new StructuralError(i, "Unexpected ':' (colon position is wrong)");
+                }
+                expect = Expect.OBJ_VALUE;
+                i++;
+                continue;
+            }
+
+            // comma
+            if (c == ',') {
+                if (ctx.peek() == Ctx.OBJECT) {
+                    if (expect != Expect.OBJ_COMMA_OR_END) {
+                        return new StructuralError(i, "Unexpected ',' in object");
+                    }
+                    expect = Expect.OBJ_KEY_OR_END;
+                } else {
+                    if (expect != Expect.ARR_COMMA_OR_END) {
+                        return new StructuralError(i, "Unexpected ',' in array");
+                    }
+                    expect = Expect.ARR_VALUE_OR_END;
+                }
+                i++;
+                continue;
+            }
+
+            // primitive token: STRICT (non-negative integers only) OR true/false/null
+            if (ctx.peek() == Ctx.OBJECT) {
+                if (expect != Expect.OBJ_VALUE) {
+                    return new StructuralError(i, "Unexpected token in object (value must come after ':')");
+                }
+                int next = consumePrimitiveToken(json, i);
+                if (next == i) {
+                    return new StructuralError(i, "Invalid token");
+                }
+
+                String token = json.substring(i, next);
+                if (!isValidConfigPrimitive(token)) {
+                    return new StructuralError(i, "Invalid primitive token: " + token);
+                }
+
+                expect = Expect.OBJ_COMMA_OR_END;
+                i = next;
+                continue;
+            } else {
+                if (expect != Expect.ARR_VALUE_OR_END) {
+                    return new StructuralError(i, "Unexpected token in array");
+                }
+                int next = consumePrimitiveToken(json, i);
+                if (next == i) {
+                    return new StructuralError(i, "Invalid token");
+                }
+
+                String token = json.substring(i, next);
+                if (!isValidConfigPrimitive(token)) {
+                    return new StructuralError(i, "Invalid primitive token: " + token);
+                }
+
+                expect = Expect.ARR_COMMA_OR_END;
+                i = next;
+                continue;
+            }
+        }
+
+        return null;
+    }
+
+    private static int findStringEnd(String s, int startQuote) {
+        for (int i = startQuote + 1; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"' && s.charAt(i - 1) != '\\') {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int consumePrimitiveToken(String s, int i) {
+        int n = s.length();
+        int start = i;
+        while (i < n) {
+            char c = s.charAt(i);
+            if (isWhitespace(c) || c == ',' || c == ']' || c == '}' || c == ':') {
+                break;
+            }
+            i++;
+        }
+        return (i == start) ? start : i;
+    }
+
+    // ========= CASE 9: CONFIG PRIMITIVES =========
+    // In this config: numbers must be NON-NEGATIVE INTEGERS ONLY (no '-', no '.', no 'e')
+    private static boolean isValidConfigPrimitive(String token) {
+        if (token == null || token.isEmpty()) {
+            return false;
+        }
+
+        if (token.equals("true") || token.equals("false") || token.equals("null")) {
+            return true;
+        }
+        return isValidNonNegativeInteger(token);
+    }
+
+    private static boolean isValidNonNegativeInteger(String s) {
+        int n = s.length();
+        if (n == 0) {
+            return false;
+        }
+
+        // forbid + or -
+        char first = s.charAt(0);
+        if (first == '-' || first == '+') {
+            return false;
+        }
+
+        // digits only
+        for (int i = 0; i < n; i++) {
+            if (!isDigit(s.charAt(i))) {
+                return false;
+            }
+        }
+
+        // forbid leading zeros except "0"
+        if (n > 1 && s.charAt(0) == '0') {
+            return false;
+        }
+
+        return true;
+    }
+
+    // ========= CASE 4: INVALID CHARS OUTSIDE STRINGS (basic filter) =========
     private static Integer findInvalidCharOutsideStrings(String json) {
-        boolean insideString = false;
+        boolean inside = false;
 
         for (int i = 0; i < json.length(); i++) {
             char c = json.charAt(i);
 
             if (c == '"' && (i == 0 || json.charAt(i - 1) != '\\')) {
-                insideString = !insideString;
+                inside = !inside;
+                continue;
+            }
+            if (inside) {
                 continue;
             }
 
-            if (insideString) {
-                continue;
-            }
-
-            // allowed whitespace
             if (isWhitespace(c)) {
                 continue;
             }
-
-            // allowed JSON structural chars
-            if (c == '{' || c == '}' || c == '[' || c == ']' || c == ',' || c == ':') {
+            if ("{}[],:".indexOf(c) >= 0) {
+                continue;
+            }
+            if (isDigit(c)) {
                 continue;
             }
 
-            // allow digits and minus (for numbers)
-            if (c == '-' || isDigit(c)) {
+            // allow letters used in true/false/null
+            if ("tfnrueals".indexOf(c) >= 0) {
                 continue;
             }
 
-            // allow letters used in true/false/null (basic filter)
-            if (c == 't' || c == 'f' || c == 'n' || c == 'r' || c == 'e' || c == 'l' || c == 'u' || c == 'a'
-                    || c == 's') {
-                continue;
-            }
-
-            // anything else is invalid
             return i;
         }
         return null;
     }
 
-    // ========= CHECK 5: EXTRA CONTENT AFTER ROOT OBJECT =========
-    private static Integer findExtraContentAfterRootObject(String json, int rootStartIndex) {
-        boolean insideString = false;
+    // ========= CASE 5: EXTRA CONTENT AFTER ROOT OBJECT =========
+    private static Integer findExtraContentAfterRootObject(String json, int start) {
+        boolean inside = false;
         int depth = 0;
-        boolean started = false;
 
-        for (int i = rootStartIndex; i < json.length(); i++) {
+        for (int i = start; i < json.length(); i++) {
             char c = json.charAt(i);
 
-            // toggle string state
             if (c == '"' && (i == 0 || json.charAt(i - 1) != '\\')) {
-                insideString = !insideString;
+                inside = !inside;
                 continue;
             }
-
-            if (insideString) {
+            if (inside) {
                 continue;
             }
 
             if (c == '{') {
                 depth++;
-                started = true;
             } else if (c == '}') {
                 depth--;
-                if (depth == 0 && started) {
-                    // root object ended here, now check what's after it
+                if (depth == 0) {
                     int j = i + 1;
                     while (j < json.length() && isWhitespace(json.charAt(j))) {
                         j++;
                     }
                     if (j < json.length()) {
-                        return j; // extra non-whitespace content
+                        return j;
                     }
-                    return null; // ok, nothing after root
-                }
-                if (depth < 0) {
-                    return i; // unmatched closing
+                    return null;
                 }
             }
         }
-
-        // If we never reached depth==0, something is off (but balance check should catch it)
         return null;
     }
 
