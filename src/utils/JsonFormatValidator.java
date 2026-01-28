@@ -5,6 +5,7 @@ import java.util.Stack;
 public class JsonFormatValidator {
 
     public static class InnerJsonFormatValidator {
+
         public boolean status;
         public String message;
         public Integer index;
@@ -54,6 +55,7 @@ public class JsonFormatValidator {
         if (hasTrailingComma(json)) {
             return new InnerJsonFormatValidator(false, "Trailing comma detected", null);
         }
+
         // CASE 4: reject unknown characters outside strings
         Integer badCharIndex = findInvalidCharOutsideStrings(json);
         if (badCharIndex != null) {
@@ -61,6 +63,16 @@ public class JsonFormatValidator {
                     false,
                     "Invalid character outside strings: '" + json.charAt(badCharIndex) + "'",
                     badCharIndex);
+        }
+
+        // CASE 5: extra non-whitespace content after root object ends
+        Integer extraIndex = findExtraContentAfterRootObject(json, firstNonWhitespace);
+        System.out.println("ccccccc"+extraIndex);
+        if (extraIndex != null) {
+            return new InnerJsonFormatValidator(
+                    false,
+                    "Extra content after root JSON object",
+                    extraIndex);
         }
 
         return new InnerJsonFormatValidator(true, "JSON format looks valid", null);
@@ -153,29 +165,79 @@ public class JsonFormatValidator {
                 continue;
             }
 
-            if (insideString)
+            if (insideString) {
                 continue;
+            }
 
             // allowed whitespace
-            if (isWhitespace(c))
+            if (isWhitespace(c)) {
                 continue;
+            }
 
             // allowed JSON structural chars
-            if (c == '{' || c == '}' || c == '[' || c == ']' || c == ',' || c == ':')
+            if (c == '{' || c == '}' || c == '[' || c == ']' || c == ',' || c == ':') {
                 continue;
+            }
 
             // allow digits and minus (for numbers)
-            if (c == '-' || isDigit(c))
+            if (c == '-' || isDigit(c)) {
                 continue;
+            }
 
-            // allow t/f/n (for true/false/null beginnings)
+            // allow letters used in true/false/null (basic filter)
             if (c == 't' || c == 'f' || c == 'n' || c == 'r' || c == 'e' || c == 'l' || c == 'u' || c == 'a'
-                    || c == 's')
+                    || c == 's') {
                 continue;
+            }
 
             // anything else is invalid
             return i;
         }
+        return null;
+    }
+
+    // ========= CHECK 5: EXTRA CONTENT AFTER ROOT OBJECT =========
+    private static Integer findExtraContentAfterRootObject(String json, int rootStartIndex) {
+        boolean insideString = false;
+        int depth = 0;
+        boolean started = false;
+
+        for (int i = rootStartIndex; i < json.length(); i++) {
+            char c = json.charAt(i);
+
+            // toggle string state
+            if (c == '"' && (i == 0 || json.charAt(i - 1) != '\\')) {
+                insideString = !insideString;
+                continue;
+            }
+
+            if (insideString) {
+                continue;
+            }
+
+            if (c == '{') {
+                depth++;
+                started = true;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0 && started) {
+                    // root object ended here, now check what's after it
+                    int j = i + 1;
+                    while (j < json.length() && isWhitespace(json.charAt(j))) {
+                        j++;
+                    }
+                    if (j < json.length()) {
+                        return j; // extra non-whitespace content
+                    }
+                    return null; // ok, nothing after root
+                }
+                if (depth < 0) {
+                    return i; // unmatched closing
+                }
+            }
+        }
+
+        // If we never reached depth==0, something is off (but balance check should catch it)
         return null;
     }
 
